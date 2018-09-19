@@ -1,0 +1,451 @@
+---
+title: "AnkeXu_Project1_HappyDB"
+author: "Anke Xu"
+date: "2018/9/16"
+output:
+  html_notebook
+---
+
+### Step 0 - Load all the required libraries
+
+From the packages' descriptions:
+
++ `tm` is a framework for text mining applications within R;
++ `tidyverse` is an opinionated collection of R packages designed for data science. All packages share an underlying design philosophy, grammar, and data structures;
++ `tidytext` allows text mining using 'dplyr', 'ggplot2', and other tidy tools;
++ `DT` provides an R interface to the JavaScript library DataTables.
+
+```{r load libraries, warning=FALSE, message=FALSE}
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(DT)
+# multiplot()    
+```
+
+### Step 1 - Load the data to be cleaned and processed
+
+
+```{r,warning=FALSE, message=FALSE, results= 'hide'}
+urlfile<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/cleaned_hm.csv'
+hm_data <- read_csv(urlfile)
+
+
+urlfile2<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/demographic.csv'
+demo_data <- read_csv(urlfile2)
+```
+
+### Step 2 - Preliminary cleaning of text
+
+We clean the text by converting all the letters to the lower case, and removing punctuation, numbers, empty words and extra white space.
+
+```{r text processing in tm}
+corpus <- VCorpus(VectorSource(hm_data$cleaned_hm))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(stripWhitespace)
+```
+
+### Step 3 - Stemming words and converting tm object to tidy object
+
+Stemming reduces a word to its word *stem*. We stem the words here and then convert the "tm" object to a "tidy" object for much faster processing.
+
+```{r stemming}
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+```
+
+### Step 4 - Creating tidy format of the dictionary to be used for completing stems
+
+We also need a dictionary to look up the words corresponding to the stems.
+
+```{r tidy dictionary}
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+```
+
+### Step 5 - Removing stopwords that don't hold any significant information for our data set
+
+We remove stopwords provided by the "tidytext" package and also add custom stopwords in context of our data.
+
+```{r stopwords}
+data("stop_words")
+
+word <- c("happy","ago","yesterday","lot","today","months","month",'weeks','havent','couldnt','theyll','im','happiness','initially',
+                 'hadnt',"happier","happiest","last","week","past",'day','time','moment','im','finally','days','nice','recently','favorite')
+
+stop_words <- stop_words %>%
+  bind_rows(mutate(tibble(word), lexicon = "updated"))
+```
+
+### Step 6 - Combining stems and dictionary into the same tibble
+
+Here we combine the stems and the dictionary into the same "tidy" object.
+
+```{r tidy stems with dictionary}
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) %>%
+  anti_join(stop_words, by = c("dictionary" = "word"))
+
+```
+
+### Step 7 - Stem completion
+
+Lastly, we complete the stems by picking the corresponding word with the highest frequency.
+
+```{r stem completion, warning=FALSE, message=FALSE}
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+```
+
+### Step 8 - Pasting stem completed individual words into their respective happy moments
+
+We want our processed words to resemble the structure of the original happy moments. So we paste the words together to form happy moments.
+
+```{r reverse unnest}
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+```
+
+### Step 9 - Keeping a track of the happy moments with their own ID
+
+```{r cleaned hm_data, warning=FALSE, message=FALSE}
+hm_data <- hm_data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+
+```
+
+### Step 10 - Combine both the data sets and keep the required columns for analysis
+
+We select a subset of the data that satisfies specific row conditions.
+
+```{r combining data, warning=FALSE, message=FALSE}
+library(wordcloud2)
+library(wordcloud)
+library(ngram)
+library(RColorBrewer)
+library(plotly)
+library(dplyr)
+library(Rmisc)  
+library(ggplot2)
+library(reshape)
+library(gridExtra)
+
+hm_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(wid,
+         original_hm,
+         cleaned_hm,
+         gender, 
+         marital, 
+         parenthood,
+         reflection_period,
+         age, 
+         country, 
+         ground_truth_category, 
+         text) %>%
+  mutate(count = sapply(hm_data$text, wordcount)) %>%
+  filter(gender %in% c("m", "f")) %>%
+  filter(marital %in% c("single", "married")) %>%
+  filter(parenthood %in% c("n", "y")) %>%
+  filter(reflection_period %in% c("24h", "3m")) %>%
+  mutate(reflection_period = fct_recode(reflection_period, 
+                                        months_3 = "3m", hours_24 = "24h"))
+```
+
+
+
+
+### Step 11 - Data cleaning
+
+We are going to see what the description of the data and then clean the data by examining the features of country, gender, age, marital status, parenthood. We found the missing data in country, age and ground_truth_category.
+
+
+```{r,warning=FALSE, message=FALSE}
+sort(sapply(hm_data,function(x){sum(is.na(x))}),decreasing = TRUE)
+```
+
+Since country and age are the two topics we're interested in, we omit the data points that are not having those information for our analysis.
+
+```{r}
+hm_data <- hm_data[!is.na(hm_data$country),] # Omit the data points that are not having country information
+hm_data <- hm_data[!is.na(hm_data$age),]     # Omit the data points that are not having age information
+
+```
+
+
+### Step 12 - Creating the word cloud and bar graph to acquire top 100 keywords 
+
+We would like to create a word cloud graph to explore what really makes staff happy.
+
+```{r,warning=FALSE, message=FALSE}
+wordcount_data <- hm_data$text %>% str_trim() %>% lapply(strsplit," ") %>% unlist() %>% table() %>% as.data.frame()
+
+colnames(wordcount_data) <- c("Keyword","Freq")
+
+sorted_data <- wordcount_data %>% dplyr::arrange(desc(Freq))
+
+wordcloud2(sorted_data[1:100,], size = 0.5,shape = "circle")
+```
+
+We select the top-20 highest frequence words to explore the significant factors of happiness.
+
+```{r, warning=FALSE, message=FALSE}
+vis_data <- head(sorted_data, n =20)
+g <- ggplot(vis_data,aes(fill=vis_data$Keyword)) + geom_bar(aes(x=vis_data$Keyword,y=vis_data$Freq),stat='identity',fill="steelblue")+theme(axis.text.x = element_text(angle=65, vjust=0.6)) +scale_x_discrete(limits= vis_data$Keyword) + guides(fill=FALSE)
+g
+```
+
+The words are mostly associated with 'friends':
+
+```{r, warning=FALSE, message=FALSE,results= FALSE}
+
+hm_data_associate <- hm_data[hm_data$count > 2,]
+set.seed(223)
+dtm <- DocumentTermMatrix(VCorpus(VectorSource(sample(hm_data_associate$text,200))))
+as.matrix(dtm)
+```
+
+```{r}
+findAssocs(dtm, terms = "friend", corlimit = 0.2)
+```
+
+
+### Step13: Topic 1 - What are the different words mentioned by different Countries, USA vs IND? Does it relate to their culture background?
+
+#### the United States and India, two countries, have much more data points than other countries.
+
+```{r,warning=FALSE, message=FALSE}
+count(hm_data$country)[count(hm_data$country)$freq>500,]
+```
+
+
+```{r,warning=FALSE}
+library(gridExtra)
+
+usa_people <- hm_data[which(hm_data$country=="USA"),]
+usa_people_word <- usa_people$text %>% str_trim() %>% lapply(strsplit," ") %>% unlist() %>% table() %>% as.data.frame() %>% dplyr::arrange(desc(Freq))
+
+ind_people <- hm_data[which(hm_data$country=="IND"),]
+ind_people_word <- ind_people$text %>% str_trim() %>% lapply(strsplit," ") %>% unlist() %>% table() %>% as.data.frame() %>% dplyr::arrange(desc(Freq))
+
+
+topten_usa<-  usa_people_word[1:10,]
+
+names(topten_usa) <- c("keywords","freq")
+g_usa<-ggplot(topten_usa) + geom_bar(aes(x=topten_usa$keywords,y=topten_usa$freq),position="dodge",stat = "identity",width=0.6,fill="red")+scale_x_discrete(limits= rev(topten_usa$keywords))+ guides(fill=F)+ggtitle("USA People")+coord_flip()
+
+topten_ind<- ind_people_word[1:10,]
+
+names(topten_ind) <- c("keywords","freq")
+g_ind<-ggplot(topten_ind) + geom_bar(aes(x=topten_ind$keywords,y=topten_ind$freq),position="dodge",stat = "identity",width=0.6,fill="steelblue")+scale_x_discrete(limits= rev(topten_ind$keywords))+ guides(fill=F)+ggtitle("IND People")+coord_flip()
+
+#g_usa,g_ind
+grid.arrange(g_usa,g_ind,ncol=2,nrow=1)
+#cowplot::plot_grid(g_usa,g_ind,labels = "AUTO" )
+```
+
+#### The commmon words used by there two countries - Commonality Cloud
+
+This commonality cloud shows the highest frequency words shared by two countries.
+
+```{r}
+
+library(RColorBrewer)
+commonality.cloud(tdm, random.order=FALSE, scale=c(5, .5),colors = brewer.pal(4, "Dark2"), max.words=100)
+
+```
+
+
+#### The different words used by these two countries - Comparison Cloud
+
+A comparison cloud compares the relative frequency with which a term was used in two or more groups and it plots the difference between the word usage in the documents. 
+
+From the comparison cloud, we can see that words like 'life' and 'family' were more front-and-center in India than in USA. We also see words like 'temple' and 'purchased', which didn’t exist (at least by that name) in USA, pop up in India's word cloud, which means it has been used more by India workers.
+
+```{r}
+
+hm_data_country<- hm_data[hm_data$country=='USA'|hm_data$country=='IND',]
+
+bag_of_words2 <-  hm_data_country %>%
+  unnest_tokens(word, text)
+
+word_count2 <- bag_of_words2 %>%group_by(country)%>%
+  dplyr::count(word, sort = TRUE)
+
+tdm2 <- cast(word_count2,word~country,value = 'n')
+tdm2[is.na(tdm2)] <- 0
+rownames(tdm2) <- tdm2$word
+tdm2$word <- NULL
+par(mfrow=c(1,1))
+comparison.cloud(tdm2, random.order=FALSE,
+                 title.size=2.5, max.words=60)
+
+```
+
+### Step 14: Topic 2 - What are the different words mentioned by different Age groups (Young Adults, Middle Age and Senior) and Gender? And what are the reasons they mentioned some words than other words?
+
+#### Create Age Groups
+
+```{r,warning=FALSE,message=FALSE}
+
+hm_data$age <- as.numeric(hm_data$age)
+hm_data <- hm_data[!is.na(hm_data$age),]
+hm_data <- hm_data[hm_data$age<100,] ## Clean the outliers
+hm_data <- hm_data[hm_data$age>10,]  ## Clean the outliers
+summary(hm_data$age)
+
+hm_data$age_group <- ifelse(hm_data$age <= 25,"Young",ifelse(hm_data$age <= 40,"Middle","Senior"))
+
+```
+
+#### Check the distribution of age by gender
+
+```{r}
+#ggplot(hm_data, aes(x=age)) + geom_histogram()
+ggplot(hm_data, aes(x=age, color=gender,fill = gender)) +
+  geom_histogram(aes(y=..density..), position="identity", alpha=0.5)
+```
+
+
+#### Check the gender ratio for each age group we created
+
+```{r}
+
+con_data<- hm_data[,c(13)] %>% dplyr::group_by(age_group) %>% count()
+con_data <- na.omit(con_data)
+
+#ggplot(con_data,aes(fill=con_data$age_group)) + geom_bar(aes(x= con_data$age_group,y=con_data$freq),stat = 'identity')
+g <- ggplot(hm_data,aes(x=hm_data$age_group)) + geom_bar(aes(y = ..count..,fill = hm_data$gender),width = 0.5)
+g
+
+```
+
+#### The different words used by these three age groups - Comparison Cloud
+
+```{r}
+bag_of_words <-  hm_data %>%
+  unnest_tokens(word, text)
+
+word_count3 <- bag_of_words %>%group_by(age_group)%>%
+  dplyr::count(word, sort = TRUE)
+
+tdm3 <- cast(word_count3,word~age_group,value = 'n')
+tdm3[is.na(tdm3)] <- 0
+rownames(tdm3) <- tdm3$word
+tdm3$word <- NULL
+par(mfrow=c(1,1))
+comparison.cloud(tdm3, random.order=FALSE,colors = c("#00B2FF", "#FF0099", "#6600CC"),
+                 title.size=2.5, max.words=150)
+
+```
+
+From this comparison cloud, we can see that words like 'friend', 'game' and words related to school were more front-and-center in young adult group than in other two groups. We also see words are smaller in the Middle Age Group, which means this age group shares lots of same words with both two other groups. Words like 'daughter' and 'flowers' have been used more by senior workers.
+
+#### The different words used by male and female - Comparison Cloud
+
+
+```{r}
+library(reshape)
+
+bag_of_words <-  hm_data %>%
+  unnest_tokens(word, text)
+
+word_count <- bag_of_words %>%group_by(gender)%>%
+  dplyr::count(word, sort = TRUE)
+
+tdm <- cast(word_count,word~gender,value = 'n')
+tdm[is.na(tdm)] <- 0
+rownames(tdm) <- tdm$word
+tdm$word <- NULL
+par(mfrow=c(1,1))
+comparison.cloud(tdm, random.order=FALSE, colors = c("indianred3","lightsteelblue3"),
+                 title.size=2.5, max.words=200)
+```
+
+The gender difference is easy to see by using comparison cloud.
+
+### Step 15: Topic 3 - What are the effect of marriage and parenthood on different age group (Young Adults, Middle Age and Senior)? And what are the reasons they mentioned some words than other words?
+
+#### Age & Marital
+
+```{r}
+
+hm_data$combined <- apply( hm_data[ ,c('age_group','marital') ] , 1 , paste , collapse = "_" )
+
+bag_of_words3 <-  hm_data %>%
+  unnest_tokens(word, text)
+
+word_count3 <- bag_of_words3 %>%group_by(combined)%>%
+  dplyr::count(word, sort = TRUE)
+
+tdm3 <- cast(word_count3,word~combined,value = 'n')
+tdm3[is.na(tdm3)] <- 0
+rownames(tdm3) <- tdm3$word
+tdm3$word <- NULL
+par(mfrow=c(1,1))
+comparison.cloud(tdm3, random.order=FALSE,
+                 title.size=1, max.words=150)
+                          
+```
+
+People engaged in marriage are more often to mention about their family members. Young adult people who've has married would pay more attention to their husband or wife and also the word of 'love' and 'hug' show their emotions while people are single are mostly saying things with 'friend' and 'event'; middle age people who've been married would put more attention to their kids while single middle ages are enjoying lots of leisure time and achievement at work. Sensior people are similar in having interests in things other than their family.
+
+
+#### Age & Parenthood
+
+```{r}
+
+hm_data$combined2 <- apply( hm_data[ ,c('age_group','parenthood') ] , 1 , paste , collapse = "_" )
+
+bag_of_words4 <-  hm_data %>%
+  unnest_tokens(word, text)
+
+word_count4 <- bag_of_words4 %>%group_by(combined2)%>%
+  dplyr::count(word, sort = TRUE)
+
+tdm4 <- cast(word_count4,word~combined2,value = 'n')
+tdm4[is.na(tdm4)] <- 0
+rownames(tdm4) <- tdm4$word
+tdm4$word <- NULL
+par(mfrow=c(1,1))
+comparison.cloud(tdm4, random.order=FALSE,
+                 title.size=1, max.words=150)
+                          
+```
+
+
+People engaged in marriage are kind of similar to the conclusion in the marriage. Young adult people who have children would pay more attention to their family but also have energy and time to have fun while while people are not having children are mostly saying things with 'friend' and school life; middle age people who have children would put more attention to their kids and their health while middle ages without any children are enjoying lots of leisure time and achievement at work. Sensior people who have children and grandchildren would put lots of their minds onto those family member and would still mention their husband, while Seniors without children would explore lots of different fields in their life.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
